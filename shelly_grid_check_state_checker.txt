@@ -1,0 +1,90 @@
+let CONFIG = {
+  //interval kontroly stavu skriptu v milisekundach
+  check_interval: 1000,
+  //tu zadaj nazov pod ktorym si skript v shelly ulozil
+  script_to_check_name: "schelly_grid_check"
+}
+
+function disable_switch() {
+
+    Shelly.call("Switch.Set", {
+            id: 100,
+            on: false
+        },
+        function(result, error_code, error_message) {
+
+            //only if operation was successfull
+            if (error_code == 0) {
+
+                //send notification
+                print("Emergency, protection failed, vypinam switch");
+            }
+        }
+
+    );
+    
+}
+
+
+function disable_enabled_switch() {
+
+    Shelly.call("Switch.GetStatus", {
+            id: 100
+        },
+        function(result, error_code, error_message) {
+
+            //print(JSON.stringify(result));        
+            if (result.output !== false || error_code !== 0) {
+
+                //disable switch
+                disable_switch();
+
+            }
+
+        }
+    );
+
+}
+
+function check_status() {
+
+  Shelly.call("Script.List",{},
+            function (result, error_code, error_message) {
+
+               if ( error_code == 0 ) {
+                 
+                   //identifikuj stav skriptu podla nazvu
+                   // Find the script with the specified name
+                   let script;
+                   result.scripts.some(function (s){
+                     if(s.name === CONFIG.script_to_check_name){
+                       script = s;
+                       return true;
+                     }
+                     return false;
+                    });
+
+                  if ( script ){ 
+                    //if script is not running
+                    if ( script.running == false ) {
+                       disable_enabled_switch();
+                       print(JSON.stringify(result));
+                    } else {
+                        print(JSON.stringify(result));
+                    }
+                    
+                  } else {
+                    //if script was not found
+                    disable_enabled_switch();
+                    print(JSON.stringify(result));
+                                        
+                  }
+                 
+               }else {
+                   //if there were errors while running script.list
+                   disable_enabled_switch();
+               }               
+            });
+}          
+
+Timer.set(CONFIG.check_interval, true, check_status);

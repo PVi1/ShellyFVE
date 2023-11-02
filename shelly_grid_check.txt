@@ -1,0 +1,240 @@
+let CONFIG = {
+    //hodnoty na zaklade ZSD_technicke-podmienky-PDS_2301.pdf, sekcie:
+    // 9.1 Pozadovane nastavenie ochran posobiacich na HRM
+    // 10.1.5 Schopnost automatikeho pripojenia po planovanom odpojeni - poziadavka na typ A,B,C
+    //interval kontroly frekvencie vo vsetkych 3 fazach v milisekundach
+    freq_check_interval: 100,
+    //min vypinacia hodnota frekvencie pod
+    freq_min: 47.5,
+    //min akceptovatelna hodnota frekvencie
+    freq_min_ok: 47.5,
+    //max vypinacia hodnota frekvencie nad
+    freq_max: 51.5,
+    //max akceptovatelna hodnota frekvencie
+    freq_max_ok: 50.05,
+    //interval kontroly napatia vo vsetkych 3 fazach v milisekundach
+    voltage_check_interval: 1000,
+    //min vypinacia hodnota napatia pod
+    voltage_min: 195.5,
+    //min akceptovatelna hodnota napatia
+    voltage_min_ok: 218.5,
+    //max vypinacia hodnota napatia nad
+    voltage_max: 253,
+    //max akceptovatelna hodnota napatia
+    voltage_max_ok: 253,
+    //opozdenie aktivacie switcha (vzopnutia relay) v milisekundach, pozadovane 300-900sekund, zvol si nejaku hodnotu z tohto intervalu
+    switch_enable_delay: 350000
+};
+
+let RECOVERY_TIMER;
+let recovery_in_progress = 0;
+let VOLTAGE_STATUS = false;
+let FREQ_STATUS = false;
+
+
+function get_em_data() {
+
+    let data = Shelly.getComponentStatus("em", 0);
+    if (data !== null){
+      
+      return data;
+      
+    }else {
+      
+      disable_switch();
+      
+    }
+
+}
+
+function enable_switch() {
+
+    let data;
+    //get point in time energy data
+    data = get_em_data();
+    //enable switch
+    Shelly.call("Switch.Set", {
+            id: 100,
+            on: true
+        },
+        function(result, error_code, error_message) {
+
+            //only if operation was successful
+            if (error_code == 0) {
+
+                //disable recovery in progress flag
+                recovery_in_progress = 0;
+                print("Hodnoty napatia a frekvencie v momente zapnutia switchu \
+                Faza A(Hz, V):(" + data.a_freq + ", " + data.a_voltage + "), \
+                Faza B(Hz, V):(" + data.b_freq + ", " + data.b_voltage + "), \
+                Faza C(Hz, V):(" + data.c_freq + ", " + data.c_voltage + ")");
+
+            }
+
+        }
+    );
+
+}
+
+function disable_switch() {
+
+    Shelly.call("Switch.Set", {
+            id: 100,
+            on: false
+        },
+        function(result, error_code, error_message) {
+
+            //only if operation was successfull
+            if (error_code == 0) {
+
+                //disable recovery in progress flag and freq and voltage status
+                recovery_in_progress = 0;
+                FREQ_STATUS = false;
+                VOLTAGE_STATUS = false;
+
+            }
+        }
+
+    );
+    //in any case reset recovery timer if already set
+    if (RECOVERY_TIMER) {
+
+        Timer.clear(RECOVERY_TIMER);
+
+    }
+
+}
+
+function disable_enabled_switch() {
+
+    Shelly.call("Switch.GetStatus", {
+            id: 100
+        },
+        function(result, error_code, error_message) {
+
+            //print(JSON.stringify(result));        
+            if (result.output !== false || error_code !== 0) {
+
+                //disable switch
+                disable_switch();
+
+            }
+
+        }
+    );
+
+}
+
+function enable_disabled_switch() {
+
+    //check if the switch is disabled and schedule its enablement
+    Shelly.call(
+        "Switch.GetStatus", {
+            id: 100
+        },
+        function(result, error_code, error_message) {
+            //print(JSON.stringify(result));        
+            if (result.output !== true && error_code == 0) {
+
+                recovery_in_progress = 1;
+                print("Zapinam casovac na zapnutie switcha po " + CONFIG.switch_enable_delay / 1000 + " sekundach.");
+                RECOVERY_TIMER = Timer.set(CONFIG.switch_enable_delay, false, enable_switch);
+
+            }
+
+        }
+    );
+
+}
+
+function check_frequency() {
+
+    let data = get_em_data();
+    //problem
+    if (data.a_freq < CONFIG.freq_min || data.a_freq > CONFIG.freq_max ||
+        data.b_freq < CONFIG.freq_min || data.b_freq > CONFIG.freq_max ||
+        data.c_freq < CONFIG.freq_min || data.c_freq > CONFIG.freq_max) {
+
+        if (FREQ_STATUS == true) {
+
+            print("FREKVENCIA mimo rozsah, vypinam switch, detail: \
+            Faza A: " + data.a_freq + "Hz, \
+            Faza B: " + data.b_freq + "Hz, \
+            Faza C: " + data.c_freq + "Hz");
+            
+            //disable switch
+            disable_enabled_switch();
+            //indicate frequency status as bad
+            FREQ_STATUS = false;
+
+        }
+
+    } else if (data.a_freq >= CONFIG.freq_min_ok && data.a_freq <= CONFIG.freq_max_ok &&
+        data.b_freq >= CONFIG.freq_min_ok && data.b_freq <= CONFIG.freq_max_ok &&
+        data.c_freq >= CONFIG.freq_min_ok && data.c_freq <= CONFIG.freq_max_ok &&
+        recovery_in_progress == 0) {
+
+        //values are ok we are in problem state and there is no recovery in progress
+        if(FREQ_STATUS == false){
+          //indicate frequency status as good
+          FREQ_STATUS = true;
+          //enable only if voltage status is ok, too
+          if (VOLTAGE_STATUS == true) {
+
+              enable_disabled_switch();
+
+          }
+          
+        }
+        
+    }
+
+};
+
+function check_voltage() {
+
+    let data = get_em_data();
+
+    //problem
+    if (data.a_voltage < CONFIG.voltage_min || data.a_voltage > CONFIG.voltage_max ||
+        data.b_voltage < CONFIG.voltage_min || data.b_voltage > CONFIG.voltage_max ||
+        data.c_voltage < CONFIG.voltage_min || data.c_voltage > CONFIG.voltage_max) {
+
+        if (VOLTAGE_STATUS == true) {
+
+            print("NAPATIE mimo rozsah, vypinam switch, detail: \
+            Faza A: " + data.a_voltage + "V, \
+            Faza B: " + data.b_voltage + "V, \
+            Faza C: " + data.c_voltage + "V");
+            
+            //disable switch
+            disable_enabled_switch();
+            //indicate voltage status as bad
+            VOLTAGE_STATUS = false;
+
+        }
+
+    } else if (data.a_voltage >= CONFIG.voltage_min_ok && data.a_voltage <= CONFIG.voltage_max_ok &&
+        data.b_voltage >= CONFIG.voltage_min_ok && data.b_voltage <= CONFIG.voltage_max_ok &&
+        data.c_voltage >= CONFIG.voltage_min_ok && data.c_voltage <= CONFIG.voltage_max_ok &&
+        recovery_in_progress == 0) {
+
+        //values are ok we are in problem state and there is no recovery in progress
+        if(VOLTAGE_STATUS == false){
+          //indicate voltage status as good
+          VOLTAGE_STATUS = true;
+          //enable only if frequency status is ok, too
+          if (FREQ_STATUS == true) {
+
+              enable_disabled_switch();
+
+          }
+          
+        }
+        
+    }
+
+};
+
+Timer.set(CONFIG.freq_check_interval, true, check_frequency);
+Timer.set(CONFIG.voltage_check_interval, true, check_voltage);
